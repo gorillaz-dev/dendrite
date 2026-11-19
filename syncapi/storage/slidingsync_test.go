@@ -1,11 +1,13 @@
 package storage_test
 
 import (
+	"fmt"
 	"sort"
 	"testing"
 
 	"github.com/matrix-org/gomatrixserverlib"
 	"github.com/matrix-org/gomatrixserverlib/spec"
+	"github.com/tidwall/gjson"
 
 	rstypes "github.com/element-hq/dendrite/roomserver/types"
 	"github.com/element-hq/dendrite/syncapi/storage"
@@ -227,6 +229,63 @@ func TestAllocatedSendToDevicePosition(t *testing.T) {
 			}
 			if allocated != last || maxPos >= last {
 				t.Fatalf("got allocated position %d and max position %d, want %d and less", allocated, maxPos, last)
+			}
+		})
+	})
+}
+
+func TestSendToDeviceMessagesAfter(t *testing.T) {
+	test.WithAllDatabases(t, func(t *testing.T, dbType test.DBType) {
+		db, closeDB := MustCreateDatabase(t, dbType)
+		defer closeDB()
+
+		var positions []types.StreamPosition
+		for i := 0; i < 5; i++ {
+			for _, deviceID := range []string{"ALICE", "OTHER"} {
+				pos, err := db.StoreNewSendForDeviceMessage(ctx, "@alice:test", deviceID, gomatrixserverlib.SendToDeviceEvent{
+					Sender: "@alice:test", Type: "m.test", Content: []byte(fmt.Sprintf(`{"n": %d}`, i)),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if deviceID == "ALICE" {
+					positions = append(positions, pos)
+				}
+			}
+		}
+
+		withRollbackSnapshot(t, db, func(snapshot storage.DatabaseTransaction) {
+			// The oldest messages of the device are returned, up to the limit.
+			lastPos, events, err := snapshot.SendToDeviceMessagesAfter(ctx, "@alice:test", "ALICE", 0, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 2 || events[0].ID != positions[0] || events[1].ID != positions[1] || lastPos != positions[1] {
+				t.Fatalf("unexpected first batch: lastPos=%d events=%+v", lastPos, events)
+			}
+			if events[0].DeviceID != "ALICE" || gjson.GetBytes(events[0].Content, "n").Int() != 0 || !gjson.GetBytes(events[0].Content, "n").Exists() || events[0].Type != "m.test" {
+				t.Fatalf("unexpected event: %+v", events[0])
+			}
+			// Continuing from the last position returns the following messages.
+			lastPos, events, err = snapshot.SendToDeviceMessagesAfter(ctx, "@alice:test", "ALICE", lastPos, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 3 || events[0].ID != positions[2] || lastPos != positions[4] {
+				t.Fatalf("unexpected second batch: lastPos=%d events=%+v", lastPos, events)
+			}
+			// Without further messages, the position doesn't change.
+			lastPos, events, err = snapshot.SendToDeviceMessagesAfter(ctx, "@alice:test", "ALICE", positions[4], 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 0 || lastPos != positions[4] {
+				t.Fatalf("expected no messages: lastPos=%d events=%+v", lastPos, events)
+			}
+			// Messages of other devices are never returned.
+			_, events, err = snapshot.SendToDeviceMessagesAfter(ctx, "@alice:test", "UNKNOWN", 0, 10)
+			if err != nil || len(events) != 0 {
+				t.Fatalf("expected no messages for unknown device: %+v (err %v)", events, err)
 			}
 		})
 	})

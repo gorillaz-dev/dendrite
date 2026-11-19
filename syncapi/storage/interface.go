@@ -101,6 +101,9 @@ type DatabaseTransaction interface {
 	// SendToDeviceUpdatesForSync returns a list of send-to-device updates. It returns the
 	// relevant events within the given ranges for the supplied user ID and device ID.
 	SendToDeviceUpdatesForSync(ctx context.Context, userID, deviceID string, from, to types.StreamPosition) (pos types.StreamPosition, events []types.SendToDeviceEvent, err error)
+	// SendToDeviceMessagesAfter returns up to limit send-to-device messages for the device with a position
+	// after from, oldest first, and the position of the last message read (or from if there are none).
+	SendToDeviceMessagesAfter(ctx context.Context, userID, deviceID string, from types.StreamPosition, limit int) (types.StreamPosition, []types.SendToDeviceEvent, error)
 	// AllocatedSendToDevicePosition returns the highest position ever allocated to a send-to-device message.
 	// Unlike MaxStreamPositionForSendToDeviceMessages, it doesn't decrease when messages are deleted.
 	AllocatedSendToDevicePosition(ctx context.Context) (types.StreamPosition, error)

@@ -688,6 +688,19 @@ func (d *DatabaseTransaction) currentStateStreamEventsForRoom(
 	return s, nil
 }
 
+// SendToDeviceMessagesAfter returns up to limit send-to-device messages for the device with a
+// position after from, oldest first. It also returns the position of the last message read, which
+// is beyond the last returned message if malformed messages were skipped, or from if there are none.
+func (d *DatabaseTransaction) SendToDeviceMessagesAfter(
+	ctx context.Context, userID, deviceID string, from types.StreamPosition, limit int,
+) (types.StreamPosition, []types.SendToDeviceEvent, error) {
+	lastPos, events, err := d.SendToDevice.SelectSendToDeviceMessagesAfter(ctx, d.txn, userID, deviceID, from, limit)
+	if err != nil {
+		return from, nil, fmt.Errorf("d.SendToDevice.SelectSendToDeviceMessagesAfter: %w", err)
+	}
+	return lastPos, events, nil
+}
+
 // AllocatedSendToDevicePosition returns the highest position ever allocated to a send-to-device
 // message. Unlike MaxStreamPositionForSendToDeviceMessages, it doesn't decrease when messages are deleted.
 func (d *DatabaseTransaction) AllocatedSendToDevicePosition(ctx context.Context) (types.StreamPosition, error) {

@@ -174,6 +174,9 @@ type BackwardsExtremities interface {
 type SendToDevice interface {
 	InsertSendToDeviceMessage(ctx context.Context, txn *sql.Tx, userID, deviceID, content string) (pos types.StreamPosition, err error)
 	SelectSendToDeviceMessages(ctx context.Context, txn *sql.Tx, userID, deviceID string, from, to types.StreamPosition) (lastPos types.StreamPosition, events []types.SendToDeviceEvent, err error)
+	// SelectSendToDeviceMessagesAfter returns up to limit messages for the device with a position after
+	// from, oldest first, and the position of the last message read (or from if there are none).
+	SelectSendToDeviceMessagesAfter(ctx context.Context, txn *sql.Tx, userID, deviceID string, from types.StreamPosition, limit int) (lastPos types.StreamPosition, events []types.SendToDeviceEvent, err error)
 	DeleteSendToDeviceMessages(ctx context.Context, txn *sql.Tx, userID, deviceID string, from types.StreamPosition) (err error)
 	SelectMaxSendToDeviceMessageID(ctx context.Context, txn *sql.Tx) (id int64, err error)
 	// SelectAllocatedSendToDeviceMessageID returns the highest ID ever allocated to a send-to-device

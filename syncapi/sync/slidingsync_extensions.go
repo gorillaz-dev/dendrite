@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"net/http"
 	"strconv"
 
@@ -174,18 +173,12 @@ func (rp *RequestPool) toDeviceResult(
 	if ext.toDeviceSince != nil {
 		since = *ext.toDeviceSince
 	}
-	_, events, err := snapshot.SendToDeviceUpdatesForSync(ctx, device.UserID, device.ID, since, math.MaxInt64)
+	// Only read as many messages as are returned, so that a large backlog isn't loaded at once.
+	// The token is the position of the last message read. It must not be advanced beyond that,
+	// as messages which aren't visible to this snapshot yet could be acknowledged otherwise.
+	nextBatch, events, err := snapshot.SendToDeviceMessagesAfter(ctx, device.UserID, device.ID, since, ext.toDeviceLimit)
 	if err != nil {
-		return false, fmt.Errorf("snapshot.SendToDeviceUpdatesForSync: %w", err)
-	}
-	if len(events) > ext.toDeviceLimit {
-		events = events[:ext.toDeviceLimit]
-	}
-	// The token is the position of the last message returned. It must not be advanced beyond
-	// that, as messages which aren't visible to this snapshot yet could be acknowledged otherwise.
-	nextBatch := since
-	if len(events) > 0 {
-		nextBatch = events[len(events)-1].ID
+		return false, fmt.Errorf("snapshot.SendToDeviceMessagesAfter: %w", err)
 	}
 	messages := make([]gomatrixserverlib.SendToDeviceEvent, 0, len(events))
 	for _, ev := range events {
@@ -198,7 +191,8 @@ func (rp *RequestPool) toDeviceResult(
 	case ext.unstableEndpoint:
 		// The experimental implementations always include the section.
 		data, err = json.Marshal(types.SlidingSyncToDeviceLegacyResponse{NextBatch: nextBatchStr, Events: messages})
-	case len(messages) > 0:
+	case len(messages) > 0 || nextBatch != since:
+		// Also sent if only malformed messages were read, so that the client acknowledges them.
 		data, err = json.Marshal(types.SlidingSyncToDeviceResponse{NextBatch: nextBatchStr, Messages: messages})
 	}
 	if err != nil {

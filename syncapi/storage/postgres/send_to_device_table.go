@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS syncapi_send_to_device (
 );
 
 CREATE INDEX IF NOT EXISTS syncapi_send_to_device_user_id_device_id_idx ON syncapi_send_to_device(user_id, device_id);
+-- For reading the oldest messages of a device without sorting all of them.
+CREATE INDEX IF NOT EXISTS syncapi_send_to_device_user_id_device_id_id_idx ON syncapi_send_to_device(user_id, device_id, id);
 `
 
 const insertSendToDeviceMessageSQL = `
@@ -48,6 +50,16 @@ const selectSendToDeviceMessagesSQL = `
 	  FROM syncapi_send_to_device
 	  WHERE user_id = $1 AND device_id = $2 AND id > $3 AND id <= $4
 	  ORDER BY id ASC
+`
+
+// selectSendToDeviceMessagesAfterSQL returns the oldest messages for a device after a position,
+// limited so that large backlogs are never loaded at once.
+const selectSendToDeviceMessagesAfterSQL = `
+	SELECT id, content
+	  FROM syncapi_send_to_device
+	  WHERE user_id = $1 AND device_id = $2 AND id > $3
+	  ORDER BY id ASC
+	  LIMIT $4
 `
 
 const deleteSendToDeviceMessagesSQL = `
@@ -66,6 +78,7 @@ const selectAllocatedSendToDeviceIDSQL = "" +
 type sendToDeviceStatements struct {
 	insertSendToDeviceMessageStmt  *sql.Stmt
 	selectSendToDeviceMessagesStmt *sql.Stmt
+	selectMessagesAfterStmt        *sql.Stmt
 	deleteSendToDeviceMessagesStmt *sql.Stmt
 	selectMaxSendToDeviceIDStmt    *sql.Stmt
 	selectAllocatedIDStmt          *sql.Stmt
@@ -89,6 +102,7 @@ func NewPostgresSendToDeviceTable(db *sql.DB) (tables.SendToDevice, error) {
 	return s, sqlutil.StatementList{
 		{&s.insertSendToDeviceMessageStmt, insertSendToDeviceMessageSQL},
 		{&s.selectSendToDeviceMessagesStmt, selectSendToDeviceMessagesSQL},
+		{&s.selectMessagesAfterStmt, selectSendToDeviceMessagesAfterSQL},
 		{&s.deleteSendToDeviceMessagesStmt, deleteSendToDeviceMessagesSQL},
 		{&s.selectMaxSendToDeviceIDStmt, selectMaxSendToDeviceIDSQL},
 		{&s.selectAllocatedIDStmt, selectAllocatedSendToDeviceIDSQL},
@@ -162,4 +176,39 @@ func (s *sendToDeviceStatements) SelectAllocatedSendToDeviceMessageID(
 ) (id int64, err error) {
 	err = sqlutil.TxStmt(txn, s.selectAllocatedIDStmt).QueryRowContext(ctx).Scan(&id)
 	return
+}
+
+// SelectSendToDeviceMessagesAfter returns up to limit messages for the device with a position
+// after from, oldest first. It also returns the position of the last message read, which is
+// beyond the last returned message if malformed messages were skipped, or from if there are none.
+func (s *sendToDeviceStatements) SelectSendToDeviceMessagesAfter(
+	ctx context.Context, txn *sql.Tx, userID, deviceID string, from types.StreamPosition, limit int,
+) (lastPos types.StreamPosition, events []types.SendToDeviceEvent, err error) {
+	lastPos = from
+	rows, err := sqlutil.TxStmt(txn, s.selectMessagesAfterStmt).QueryContext(ctx, userID, deviceID, from, limit)
+	if err != nil {
+		return
+	}
+	defer internal.CloseAndLogIfError(ctx, rows, "SelectSendToDeviceMessagesAfter: rows.close() failed")
+
+	for rows.Next() {
+		var id types.StreamPosition
+		var content string
+		if err = rows.Scan(&id, &content); err != nil {
+			return
+		}
+		lastPos = max(lastPos, id)
+		event := types.SendToDeviceEvent{
+			ID:       id,
+			UserID:   userID,
+			DeviceID: deviceID,
+		}
+		if err = json.Unmarshal([]byte(content), &event.SendToDeviceEvent); err != nil {
+			logrus.WithError(err).Errorf("Failed to unmarshal send-to-device message")
+			err = nil
+			continue
+		}
+		events = append(events, event)
+	}
+	return lastPos, events, rows.Err()
 }
