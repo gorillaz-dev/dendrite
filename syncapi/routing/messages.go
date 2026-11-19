@@ -159,7 +159,7 @@ func OnIncomingMessagesRequest(
 	from, err := types.NewTopologyTokenFromString(fromQuery)
 	if err != nil {
 		var streamToken types.StreamingToken
-		if streamToken, err = types.NewStreamTokenFromString(fromQuery); err != nil {
+		if streamToken, err = parseStreamToken(fromQuery); err != nil {
 			return util.JSONResponse{
 				Code: http.StatusBadRequest,
 				JSON: spec.InvalidParam("Invalid from parameter: " + err.Error()),
@@ -185,7 +185,7 @@ func OnIncomingMessagesRequest(
 		to, err = types.NewTopologyTokenFromString(toQuery)
 		if err != nil {
 			var streamToken types.StreamingToken
-			if streamToken, err = types.NewStreamTokenFromString(toQuery); err != nil {
+			if streamToken, err = parseStreamToken(toQuery); err != nil {
 				return util.JSONResponse{
 					Code: http.StatusBadRequest,
 					JSON: spec.InvalidParam("Invalid to parameter: " + err.Error()),
@@ -316,6 +316,19 @@ func getMembershipForUser(ctx context.Context, roomID, userID string, rsAPI api.
 	}
 
 	return resp, nil
+}
+
+// parseStreamToken parses a stream token as returned by /sync, or a position
+// as returned by sliding sync (MSC4186), which can be used in the same way.
+func parseStreamToken(token string) (types.StreamingToken, error) {
+	streamToken, err := types.NewStreamTokenFromString(token)
+	if err == nil {
+		return streamToken, nil
+	}
+	if pos, posErr := types.NewSlidingSyncPositionFromString(token); posErr == nil {
+		return pos.StreamToken, nil
+	}
+	return streamToken, err
 }
 
 // retrieveEvents retrieves events from the local database for a request on

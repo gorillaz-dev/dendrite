@@ -129,6 +129,28 @@ FROM room_ids,
               ) AS x
 `
 
+// selectMaxStreamPositionsForRoomsSQL returns, for each of the given rooms, the stream position
+// of the most recent event which is not excluded from sync, optionally restricted to a set of
+// event types. It uses a LATERAL JOIN so that the per-room lookup can use the recent events index.
+const selectMaxStreamPositionsForRoomsSQL = `
+WITH room_ids AS (
+     SELECT unnest($1::text[]) AS room_id
+)
+SELECT    room_ids.room_id, x.id
+FROM room_ids,
+          LATERAL  (
+              SELECT id
+                    FROM syncapi_output_room_events latest_events
+                    WHERE
+                      latest_events.room_id = room_ids.room_id
+                      AND latest_events.exclude_from_sync = FALSE
+                      AND latest_events.id <= $2
+                      AND ( $3::text[] IS NULL OR latest_events.type = ANY($3) )
+                    ORDER BY latest_events.id DESC
+                    LIMIT 1
+              ) AS x
+`
+
 const selectMaxEventIDSQL = "" +
 	"SELECT MAX(id) FROM syncapi_output_room_events"
 
@@ -190,6 +212,7 @@ type outputRoomEventsStatements struct {
 	selectMaxEventIDStmt           *sql.Stmt
 	selectRecentEventsStmt         *sql.Stmt
 	selectRecentEventsForSyncStmt  *sql.Stmt
+	selectMaxStreamPositionsStmt   *sql.Stmt
 	selectStateInRangeFilteredStmt *sql.Stmt
 	selectStateInRangeStmt         *sql.Stmt
 	updateEventJSONStmt            *sql.Stmt
@@ -245,6 +268,7 @@ func NewPostgresEventsTable(db *sql.DB) (tables.Events, error) {
 		{&s.selectMaxEventIDStmt, selectMaxEventIDSQL},
 		{&s.selectRecentEventsStmt, selectRecentEventsSQL},
 		{&s.selectRecentEventsForSyncStmt, selectRecentEventsForSyncSQL},
+		{&s.selectMaxStreamPositionsStmt, selectMaxStreamPositionsForRoomsSQL},
 		{&s.selectStateInRangeFilteredStmt, selectStateInRangeFilteredSQL},
 		{&s.selectStateInRangeStmt, selectStateInRangeSQL},
 		{&s.updateEventJSONStmt, updateEventJSONSQL},
@@ -347,6 +371,38 @@ func (s *outputRoomEventsStatements) SelectStateInRange(
 	}
 
 	return stateNeeded, eventIDToEvent, rows.Err()
+}
+
+// SelectMaxStreamPositionsForRooms returns, for each of the given rooms, the stream position of the
+// latest event which is not excluded from sync and whose position is at most maxPos. If eventTypes
+// is not empty, only events with one of the given (exact) types are considered. Rooms without any
+// matching events are not included in the returned map.
+func (s *outputRoomEventsStatements) SelectMaxStreamPositionsForRooms(
+	ctx context.Context, txn *sql.Tx, roomIDs []string, eventTypes []string, maxPos types.StreamPosition,
+) (map[string]types.StreamPosition, error) {
+	result := make(map[string]types.StreamPosition, len(roomIDs))
+	if len(roomIDs) == 0 {
+		return result, nil
+	}
+	var typesParam pq.StringArray
+	if len(eventTypes) > 0 {
+		typesParam = pq.StringArray(eventTypes)
+	}
+	stmt := sqlutil.TxStmt(txn, s.selectMaxStreamPositionsStmt)
+	rows, err := stmt.QueryContext(ctx, pq.StringArray(roomIDs), maxPos, typesParam)
+	if err != nil {
+		return nil, err
+	}
+	defer internal.CloseAndLogIfError(ctx, rows, "selectMaxStreamPositionsForRooms: rows.close() failed")
+	for rows.Next() {
+		var roomID string
+		var pos types.StreamPosition
+		if err = rows.Scan(&roomID, &pos); err != nil {
+			return nil, err
+		}
+		result[roomID] = pos
+	}
+	return result, rows.Err()
 }
 
 // MaxID returns the ID of the last inserted event in this table. 'txn' is optional. If it is not supplied,

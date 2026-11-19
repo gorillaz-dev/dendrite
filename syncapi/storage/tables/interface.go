@@ -63,6 +63,10 @@ type Events interface {
 	// Returns up to `limit` events. Returns `limited=true` if there are more events in this range but we hit the `limit`.
 	SelectRecentEvents(ctx context.Context, txn *sql.Tx, roomIDs []string, r types.Range, eventFilter *synctypes.RoomEventFilter, chronologicalOrder bool, onlySyncEvents bool) (map[string]types.RecentEvents, error)
 	SelectEvents(ctx context.Context, txn *sql.Tx, eventIDs []string, filter *synctypes.RoomEventFilter, preserveOrder bool) ([]types.StreamEvent, error)
+	// SelectMaxStreamPositionsForRooms returns, for each of the given rooms, the stream position of the latest event
+	// which is not excluded from sync and whose position is at most maxPos. If eventTypes is not empty, only events
+	// with one of the given types are considered. Rooms without matching events are omitted from the result.
+	SelectMaxStreamPositionsForRooms(ctx context.Context, txn *sql.Tx, roomIDs []string, eventTypes []string, maxPos types.StreamPosition) (map[string]types.StreamPosition, error)
 	UpdateEventJSON(ctx context.Context, txn *sql.Tx, event *rstypes.HeaderedEvent) error
 	// DeleteEventsForRoom removes all event information for a room. This should only be done when removing the room entirely.
 	DeleteEventsForRoom(ctx context.Context, txn *sql.Tx, roomID string) (err error)
@@ -105,6 +109,9 @@ type CurrentRoomState interface {
 	SelectRoomIDsWithMembership(ctx context.Context, txn *sql.Tx, userID string, membership string) ([]string, error)
 	// SelectRoomIDsWithAnyMembership returns a map of all memberships for the given user.
 	SelectRoomIDsWithAnyMembership(ctx context.Context, txn *sql.Tx, userID string) (map[string]string, error)
+	// SelectMembershipEventsForUser returns, for each room the user has a membership event in, information about
+	// the user's current membership event.
+	SelectMembershipEventsForUser(ctx context.Context, txn *sql.Tx, userID string) (map[string]types.RoomMembership, error)
 	// SelectJoinedUsers returns a map of room ID to a list of joined user IDs.
 	SelectJoinedUsers(ctx context.Context, txn *sql.Tx) (map[string][]string, error)
 	// SelectJoinedUsersInRoom returns a map of room ID to a list of joined user IDs for a given room.
@@ -188,6 +195,8 @@ type Memberships interface {
 	SelectMembershipCount(ctx context.Context, txn *sql.Tx, roomID, membership string, pos types.StreamPosition) (count int, err error)
 	SelectMembershipForUser(ctx context.Context, txn *sql.Tx, roomID, userID string, pos int64) (membership string, topologicalPos int64, err error)
 	PurgeMemberships(ctx context.Context, txn *sql.Tx, roomID string) error
+	// SelectRoomsEverJoined returns the subset of the given rooms which the user has been joined to at some point.
+	SelectRoomsEverJoined(ctx context.Context, txn *sql.Tx, userID string, roomIDs []string) (map[string]struct{}, error)
 	SelectMemberships(
 		ctx context.Context, txn *sql.Tx,
 		roomID string, pos types.TopologyToken,

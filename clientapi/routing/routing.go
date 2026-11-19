@@ -91,6 +91,10 @@ func Setup(
 	for _, msc := range cfg.MSCs.MSCs {
 		unstableFeatures["org.matrix."+msc] = true
 	}
+	if cfg.MSCs.Enabled("msc4186") {
+		// Simplified sliding sync uses its own unstable feature flag.
+		unstableFeatures["org.matrix.simplified_msc3575"] = true
+	}
 
 	// singleflight protects /join endpoints from being invoked
 	// multiple times from the same user and room, otherwise

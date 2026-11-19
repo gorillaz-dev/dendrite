@@ -68,7 +68,7 @@ Yes
 
 ## Does Dendrite support Threads?
 
-Yes, to enable them [msc2836](https://github.com/matrix-org/matrix-spec-proposals/pull/2836) would need to be added to mscs configuration in order to support Threading. Other MSCs are not currently supported.
+Yes, to enable them [msc2836](https://github.com/matrix-org/matrix-spec-proposals/pull/2836) would need to be added to mscs configuration in order to support Threading. Adding [msc4186](https://github.com/matrix-org/matrix-spec-proposals/pull/4186) enables simplified sliding sync. Sliding sync connections are kept in memory, so clients have to start a new connection when Dendrite restarts. Other MSCs are not currently supported.
 
 ```
 mscs:

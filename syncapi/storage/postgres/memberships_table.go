@@ -16,6 +16,7 @@ import (
 	rstypes "github.com/element-hq/dendrite/roomserver/types"
 	"github.com/element-hq/dendrite/syncapi/storage/tables"
 	"github.com/element-hq/dendrite/syncapi/types"
+	"github.com/lib/pq"
 )
 
 // The memberships table is designed to track the last time that
@@ -57,6 +58,9 @@ const selectMembershipCountSQL = "" +
 const selectMembershipBeforeSQL = "" +
 	"SELECT membership, topological_pos FROM syncapi_memberships WHERE room_id = $1 and user_id = $2 AND topological_pos <= $3 ORDER BY topological_pos DESC LIMIT 1"
 
+const selectRoomsEverJoinedSQL = "" +
+	"SELECT room_id FROM syncapi_memberships WHERE user_id = $1 AND membership = 'join' AND room_id = ANY($2)"
+
 const purgeMembershipsSQL = "" +
 	"DELETE FROM syncapi_memberships WHERE room_id = $1"
 
@@ -74,6 +78,7 @@ type membershipsStatements struct {
 	selectMembershipForUserStmt *sql.Stmt
 	purgeMembershipsStmt        *sql.Stmt
 	selectMembersStmt           *sql.Stmt
+	selectRoomsEverJoinedStmt   *sql.Stmt
 }
 
 func NewPostgresMembershipsTable(db *sql.DB) (tables.Memberships, error) {
@@ -88,6 +93,7 @@ func NewPostgresMembershipsTable(db *sql.DB) (tables.Memberships, error) {
 		{&s.selectMembershipForUserStmt, selectMembershipBeforeSQL},
 		{&s.purgeMembershipsStmt, purgeMembershipsSQL},
 		{&s.selectMembersStmt, selectMembersSQL},
+		{&s.selectRoomsEverJoinedStmt, selectRoomsEverJoinedSQL},
 	}.Prepare(db)
 }
 
@@ -164,4 +170,27 @@ func (s *membershipsStatements) SelectMemberships(
 		eventIDs = append(eventIDs, eventID)
 	}
 	return eventIDs, rows.Err()
+}
+
+// SelectRoomsEverJoined returns the subset of the given rooms which the user has been joined to at some point.
+func (s *membershipsStatements) SelectRoomsEverJoined(
+	ctx context.Context, txn *sql.Tx, userID string, roomIDs []string,
+) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	if len(roomIDs) == 0 {
+		return result, nil
+	}
+	rows, err := sqlutil.TxStmt(txn, s.selectRoomsEverJoinedStmt).QueryContext(ctx, userID, pq.StringArray(roomIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer internal.CloseAndLogIfError(ctx, rows, "SelectRoomsEverJoined: rows.close() failed")
+	var roomID string
+	for rows.Next() {
+		if err = rows.Scan(&roomID); err != nil {
+			return nil, err
+		}
+		result[roomID] = struct{}{}
+	}
+	return result, rows.Err()
 }

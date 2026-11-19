@@ -148,6 +148,6 @@ func AddPublicRoutes(
 	routing.Setup(
 		routers.Client, requestPool, syncDB, userAPI,
 		rsAPI, &dendriteCfg.SyncAPI, caches, fts,
-		rateLimits,
+		rateLimits, dendriteCfg.MSCs.Enabled("msc4186"),
 	)
 }

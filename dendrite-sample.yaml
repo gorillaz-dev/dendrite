@@ -304,6 +304,7 @@ media_api:
 mscs:
   mscs:
   #  - msc2836  # (Threading, see https://github.com/matrix-org/matrix-doc/pull/2836)
+  #  - msc4186  # (Simplified sliding sync, see https://github.com/matrix-org/matrix-spec-proposals/pull/4186)
 
 # Configuration for the Sync API.
 sync_api:

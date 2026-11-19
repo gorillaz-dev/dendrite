@@ -80,6 +80,9 @@ const selectRoomIDsWithMembershipSQL = "" +
 const selectRoomIDsWithAnyMembershipSQL = "" +
 	"SELECT room_id, membership FROM syncapi_current_room_state WHERE type = 'm.room.member' AND state_key = $1"
 
+const selectMembershipEventsForUserSQL = "" +
+	"SELECT room_id, membership, event_id, sender, added_at FROM syncapi_current_room_state WHERE type = 'm.room.member' AND state_key = $1"
+
 const selectCurrentStateSQL = "" +
 	"SELECT event_id, headered_event_json FROM syncapi_current_room_state WHERE room_id = $1" +
 	" AND ( $2::text[] IS NULL OR     sender  = ANY($2)  )" +
@@ -121,6 +124,7 @@ type currentRoomStateStatements struct {
 	deleteRoomStateForRoomStmt         *sql.Stmt
 	selectRoomIDsWithMembershipStmt    *sql.Stmt
 	selectRoomIDsWithAnyMembershipStmt *sql.Stmt
+	selectMembershipEventsForUserStmt  *sql.Stmt
 	selectCurrentStateStmt             *sql.Stmt
 	selectJoinedUsersStmt              *sql.Stmt
 	selectJoinedUsersInRoomStmt        *sql.Stmt
@@ -154,6 +158,7 @@ func NewPostgresCurrentRoomStateTable(db *sql.DB) (tables.CurrentRoomState, erro
 		{&s.deleteRoomStateForRoomStmt, deleteRoomStateForRoomSQL},
 		{&s.selectRoomIDsWithMembershipStmt, selectRoomIDsWithMembershipSQL},
 		{&s.selectRoomIDsWithAnyMembershipStmt, selectRoomIDsWithAnyMembershipSQL},
+		{&s.selectMembershipEventsForUserStmt, selectMembershipEventsForUserSQL},
 		{&s.selectCurrentStateStmt, selectCurrentStateSQL},
 		{&s.selectJoinedUsersStmt, selectJoinedUsersSQL},
 		{&s.selectJoinedUsersInRoomStmt, selectJoinedUsersInRoomSQL},
@@ -163,6 +168,35 @@ func NewPostgresCurrentRoomStateTable(db *sql.DB) (tables.CurrentRoomState, erro
 		{&s.selectMembershipCountStmt, selectMembershipCount},
 		{&s.selectRoomHeroesStmt, selectRoomHeroes},
 	}.Prepare(db)
+}
+
+// SelectMembershipEventsForUser returns, for each room the user has a membership event in, information
+// about the user's current membership event.
+func (s *currentRoomStateStatements) SelectMembershipEventsForUser(
+	ctx context.Context, txn *sql.Tx, userID string,
+) (map[string]types.RoomMembership, error) {
+	rows, err := sqlutil.TxStmt(txn, s.selectMembershipEventsForUserStmt).QueryContext(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer internal.CloseAndLogIfError(ctx, rows, "selectMembershipEventsForUser: rows.close() failed")
+
+	result := make(map[string]types.RoomMembership)
+	for rows.Next() {
+		var (
+			roomID     string
+			membership sql.NullString
+			addedAt    sql.NullInt64
+			m          types.RoomMembership
+		)
+		if err = rows.Scan(&roomID, &membership, &m.EventID, &m.Sender, &addedAt); err != nil {
+			return nil, err
+		}
+		m.Membership = membership.String
+		m.StreamPos = types.StreamPosition(addedAt.Int64)
+		result[roomID] = m
+	}
+	return result, rows.Err()
 }
 
 // SelectJoinedUsers returns a map of room ID to a list of joined user IDs.

@@ -45,6 +45,8 @@ type RequestPool struct {
 	Notifier *notifier.Notifier
 	producer PresencePublisher
 	consumer PresenceConsumer
+	// The connections of simplified sliding sync (MSC4186).
+	slidingSync *slidingSyncConnections
 }
 
 type PresencePublisher interface {
@@ -69,18 +71,20 @@ func NewRequestPool(
 		)
 	}
 	rp := &RequestPool{
-		db:       db,
-		cfg:      cfg,
-		userAPI:  userAPI,
-		rsAPI:    rsAPI,
-		lastseen: &sync.Map{},
-		presence: &sync.Map{},
-		streams:  streams,
-		Notifier: notifier,
-		producer: producer,
-		consumer: consumer,
+		db:          db,
+		cfg:         cfg,
+		userAPI:     userAPI,
+		rsAPI:       rsAPI,
+		lastseen:    &sync.Map{},
+		presence:    &sync.Map{},
+		streams:     streams,
+		Notifier:    notifier,
+		producer:    producer,
+		consumer:    consumer,
+		slidingSync: newSlidingSyncConnections(),
 	}
 	go rp.cleanLastSeen()
+	go rp.slidingSync.cleanup()
 	go rp.cleanPresence(db, time.Minute*5)
 	return rp
 }

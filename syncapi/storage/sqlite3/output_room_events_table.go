@@ -74,6 +74,13 @@ const selectRecentEventsForSyncSQL = "" +
 
 // WHEN, ORDER BY and LIMIT are appended by prepareWithFilters
 
+// selectMaxStreamPositionForRoomSQL returns the stream position of the most recent event in a room
+// which is not excluded from sync. An optional "AND type IN (...)" clause is inserted at $TYPES.
+const selectMaxStreamPositionForRoomSQL = "" +
+	"SELECT id FROM syncapi_output_room_events" +
+	" WHERE room_id = $1 AND exclude_from_sync = FALSE AND id <= $2 $TYPES" +
+	" ORDER BY id DESC LIMIT 1"
+
 const selectMaxEventIDSQL = "" +
 	"SELECT MAX(id) FROM syncapi_output_room_events"
 
@@ -269,6 +276,54 @@ func (s *outputRoomEventsStatements) SelectStateInRange(
 	return stateNeeded, eventIDToEvent, rows.Err()
 }
 
+// SelectMaxStreamPositionsForRooms returns, for each of the given rooms, the stream position of the
+// latest event which is not excluded from sync and whose position is at most maxPos. If eventTypes
+// is not empty, only events with one of the given (exact) types are considered. Rooms without any
+// matching events are not included in the returned map.
+func (s *outputRoomEventsStatements) SelectMaxStreamPositionsForRooms(
+	ctx context.Context, txn *sql.Tx, roomIDs []string, eventTypes []string, maxPos types.StreamPosition,
+) (map[string]types.StreamPosition, error) {
+	result := make(map[string]types.StreamPosition, len(roomIDs))
+	if len(roomIDs) == 0 {
+		return result, nil
+	}
+	typesClause := ""
+	if len(eventTypes) > 0 {
+		typesClause = "AND type IN " + sqlutil.QueryVariadicOffset(len(eventTypes), 2)
+	}
+	query := strings.Replace(selectMaxStreamPositionForRoomSQL, "$TYPES", typesClause, 1)
+	var stmt *sql.Stmt
+	var err error
+	if txn != nil {
+		stmt, err = txn.PrepareContext(ctx, query)
+	} else {
+		stmt, err = s.db.PrepareContext(ctx, query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer internal.CloseAndLogIfError(ctx, stmt, "selectMaxStreamPositionsForRooms: stmt.close() failed")
+
+	params := make([]interface{}, 0, len(eventTypes)+2)
+	params = append(params, "", maxPos)
+	for _, eventType := range eventTypes {
+		params = append(params, eventType)
+	}
+	for _, roomID := range roomIDs {
+		params[0] = roomID
+		var pos types.StreamPosition
+		err = stmt.QueryRowContext(ctx, params...).Scan(&pos)
+		switch err {
+		case nil:
+			result[roomID] = pos
+		case sql.ErrNoRows:
+		default:
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
 // MaxID returns the ID of the last inserted event in this table. 'txn' is optional. If it is not supplied,
 // then this function should only ever be used at startup, as it will race with inserting events if it is
 // done afterwards. If there are no inserted events, 0 is returned.
@@ -276,8 +331,8 @@ func (s *outputRoomEventsStatements) SelectMaxEventID(
 	ctx context.Context, txn *sql.Tx,
 ) (id int64, err error) {
 	var nullableID sql.NullInt64
+	// Don't close the statement: without a transaction, it is the shared prepared statement.
 	stmt := sqlutil.TxStmt(txn, s.selectMaxEventIDStmt)
-	defer internal.CloseAndLogIfError(ctx, stmt, "SelectMaxEventID: stmt.close() failed")
 	err = stmt.QueryRowContext(ctx).Scan(&nullableID)
 	if nullableID.Valid {
 		id = nullableID.Int64

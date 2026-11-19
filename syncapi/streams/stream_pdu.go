@@ -487,6 +487,18 @@ func (p *PDUStreamProvider) addRoomDeltaToResponse(
 	return latestPosition, nil
 }
 
+// ApplyHistoryVisibilityFilter removes all events from recentEvents the user is not allowed to see,
+// while always keeping state events which are part of the current room state.
+func ApplyHistoryVisibilityFilter(
+	ctx context.Context,
+	snapshot storage.DatabaseTransaction,
+	rsAPI roomserverAPI.SyncRoomserverAPI,
+	roomID, userID string,
+	recentEvents []*rstypes.HeaderedEvent,
+) ([]*rstypes.HeaderedEvent, error) {
+	return applyHistoryVisibilityFilter(ctx, snapshot, rsAPI, roomID, userID, recentEvents)
+}
+
 // applyHistoryVisibilityFilter gets the current room state and supplies it to ApplyHistoryVisibilityFilter, to make
 // sure we always return the required events in the timeline.
 func applyHistoryVisibilityFilter(

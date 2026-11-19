@@ -64,6 +64,9 @@ SELECT event_id FROM
 		 	AND ($4 IS NULL OR t.membership <> $4)
 `
 
+const selectHasEverJoinedSQL = "" +
+	"SELECT 1 FROM syncapi_memberships WHERE room_id = $1 AND user_id = $2 AND membership = 'join'"
+
 const purgeMembershipsSQL = "" +
 	"DELETE FROM syncapi_memberships WHERE room_id = $1"
 
@@ -75,6 +78,7 @@ type membershipsStatements struct {
 	selectMembershipForUserStmt *sql.Stmt
 	selectMembersStmt           *sql.Stmt
 	purgeMembershipsStmt        *sql.Stmt
+	selectHasEverJoinedStmt     *sql.Stmt
 }
 
 func NewSqliteMembershipsTable(db *sql.DB) (tables.Memberships, error) {
@@ -91,6 +95,7 @@ func NewSqliteMembershipsTable(db *sql.DB) (tables.Memberships, error) {
 		{&s.selectMembershipForUserStmt, selectMembershipBeforeSQL},
 		{&s.selectMembersStmt, selectMembersSQL},
 		{&s.purgeMembershipsStmt, purgeMembershipsSQL},
+		{&s.selectHasEverJoinedStmt, selectHasEverJoinedSQL},
 	}.Prepare(db)
 }
 
@@ -165,4 +170,24 @@ func (s *membershipsStatements) SelectMemberships(
 		eventIDs = append(eventIDs, eventID)
 	}
 	return eventIDs, rows.Err()
+}
+
+// SelectRoomsEverJoined returns the subset of the given rooms which the user has been joined to at some point.
+func (s *membershipsStatements) SelectRoomsEverJoined(
+	ctx context.Context, txn *sql.Tx, userID string, roomIDs []string,
+) (map[string]struct{}, error) {
+	result := make(map[string]struct{})
+	stmt := sqlutil.TxStmt(txn, s.selectHasEverJoinedStmt)
+	for _, roomID := range roomIDs {
+		var exists int
+		err := stmt.QueryRowContext(ctx, roomID, userID).Scan(&exists)
+		switch err {
+		case nil:
+			result[roomID] = struct{}{}
+		case sql.ErrNoRows:
+		default:
+			return nil, err
+		}
+	}
+	return result, nil
 }

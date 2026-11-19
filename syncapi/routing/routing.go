@@ -36,6 +36,7 @@ func Setup(
 	lazyLoadCache caching.LazyLoadCache,
 	fts fulltext.Indexer,
 	rateLimits *httputil.RateLimits,
+	enableSlidingSync bool,
 ) {
 	v1unstablemux := csMux.PathPrefix("/{apiversion:(?:v1|unstable)}/").Subrouter()
 	v3mux := csMux.PathPrefix("/{apiversion:(?:r0|v3)}/").Subrouter()
@@ -44,6 +45,15 @@ func Setup(
 	v3mux.Handle("/sync", httputil.MakeAuthAPI("sync", userAPI, func(req *http.Request, device *userapi.Device) util.JSONResponse {
 		return srp.OnIncomingSyncRequest(req, device)
 	}, httputil.WithAllowGuests())).Methods(http.MethodGet, http.MethodOptions)
+
+	if enableSlidingSync {
+		// Simplified sliding sync (MSC4186)
+		slidingSyncHandler := httputil.MakeAuthAPI("sliding_sync", userAPI, func(req *http.Request, device *userapi.Device) util.JSONResponse {
+			return srp.OnIncomingSlidingSyncRequest(req, device)
+		}, httputil.WithAllowGuests())
+		csMux.Handle("/unstable/org.matrix.simplified_msc3575/sync", slidingSyncHandler).Methods(http.MethodPost, http.MethodOptions)
+		csMux.Handle("/v4/sync", slidingSyncHandler).Methods(http.MethodPost, http.MethodOptions)
+	}
 
 	v3mux.Handle("/rooms/{roomID}/messages", httputil.MakeAuthAPI("room_messages", userAPI, func(req *http.Request, device *userapi.Device) util.JSONResponse {
 		// not specced, but ensure we're rate limiting requests to this endpoint

@@ -42,6 +42,18 @@ type DatabaseTransaction interface {
 	MembershipCount(ctx context.Context, roomID, membership string, pos types.StreamPosition) (int, error)
 	GetRoomSummary(ctx context.Context, roomID, userID string) (summary *types.Summary, err error)
 	RecentEvents(ctx context.Context, roomIDs []string, r types.Range, eventFilter *synctypes.RoomEventFilter, chronologicalOrder bool, onlySyncEvents bool) (map[string]types.RecentEvents, error)
+	// MaxStreamPositionsForRooms returns, for each of the given rooms, the stream position of the latest
+	// event which is not excluded from sync and whose position is at most maxPos. If eventTypes is not empty,
+	// only events with one of the given types are considered. Rooms without matching events are omitted.
+	MaxStreamPositionsForRooms(ctx context.Context, roomIDs []string, eventTypes []string, maxPos types.StreamPosition) (map[string]types.StreamPosition, error)
+	// MembershipEventsForUser returns, for each room the user has a membership event in, information
+	// about the user's current membership event.
+	MembershipEventsForUser(ctx context.Context, userID string) (map[string]types.RoomMembership, error)
+	// RoomsEverJoined returns the subset of the given rooms which the user has been joined to at some point.
+	RoomsEverJoined(ctx context.Context, userID string, roomIDs []string) (map[string]struct{}, error)
+	// StateTuplesChangedInRange returns, for each of the given rooms, the (type, state_key) tuples of all
+	// state which was added to or removed from the room state within the given range.
+	StateTuplesChangedInRange(ctx context.Context, roomIDs []string, r types.Range) (map[string][]gomatrixserverlib.StateKeyTuple, error)
 	GetBackwardTopologyPos(ctx context.Context, events []*rstypes.HeaderedEvent) (types.TopologyToken, error)
 	PositionInTopology(ctx context.Context, eventID string) (pos types.StreamPosition, spos types.StreamPosition, err error)
 	InviteEventsInRange(ctx context.Context, targetUserID string, r types.Range) (map[string]*rstypes.HeaderedEvent, map[string]*rstypes.HeaderedEvent, types.StreamPosition, error)

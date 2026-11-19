@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/matrix-org/gomatrixserverlib"
 	"github.com/matrix-org/gomatrixserverlib/spec"
 	"github.com/tidwall/gjson"
 
@@ -152,6 +153,76 @@ func (d *DatabaseTransaction) GetRoomSummary(ctx context.Context, roomID, userID
 	summary.Heroes = heroes
 
 	return summary, nil
+}
+
+// MaxStreamPositionsForRooms returns, for each of the given rooms, the stream position of the latest
+// event which is not excluded from sync and whose position is at most maxPos. If eventTypes is not empty,
+// only events with one of the given types are considered.
+func (d *DatabaseTransaction) MaxStreamPositionsForRooms(ctx context.Context, roomIDs []string, eventTypes []string, maxPos types.StreamPosition) (map[string]types.StreamPosition, error) {
+	return d.OutputEvents.SelectMaxStreamPositionsForRooms(ctx, d.txn, roomIDs, eventTypes, maxPos)
+}
+
+// MembershipEventsForUser returns, for each room the user has a membership event in, information
+// about the user's current membership event.
+func (d *DatabaseTransaction) MembershipEventsForUser(ctx context.Context, userID string) (map[string]types.RoomMembership, error) {
+	return d.CurrentRoomState.SelectMembershipEventsForUser(ctx, d.txn, userID)
+}
+
+// RoomsEverJoined returns the subset of the given rooms which the user has been joined to at some point.
+func (d *DatabaseTransaction) RoomsEverJoined(ctx context.Context, userID string, roomIDs []string) (map[string]struct{}, error) {
+	return d.Memberships.SelectRoomsEverJoined(ctx, d.txn, userID, roomIDs)
+}
+
+// StateTuplesChangedInRange returns, for each of the given rooms, the (type, state_key) tuples
+// of all state which was added to or removed from the room state within the given range. Rooms
+// without any state changes are omitted from the result.
+func (d *DatabaseTransaction) StateTuplesChangedInRange(ctx context.Context, roomIDs []string, r types.Range) (map[string][]gomatrixserverlib.StateKeyTuple, error) {
+	result := make(map[string][]gomatrixserverlib.StateKeyTuple)
+	if len(roomIDs) == 0 {
+		return result, nil
+	}
+	stateNeeded, eventMap, err := d.OutputEvents.SelectStateInRange(ctx, d.txn, r, nil, roomIDs)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return result, nil
+		}
+		return nil, err
+	}
+	// Events which were removed from the state are usually not part of the range,
+	// so look them up separately to find out which tuples they referred to.
+	var missing []string
+	for _, eventIDs := range stateNeeded {
+		for eventID := range eventIDs {
+			if _, ok := eventMap[eventID]; !ok {
+				missing = append(missing, eventID)
+			}
+		}
+	}
+	if len(missing) > 0 {
+		events, err := d.OutputEvents.SelectEvents(ctx, d.txn, missing, &synctypes.RoomEventFilter{Limit: len(missing)}, false)
+		if err != nil {
+			return nil, err
+		}
+		for _, ev := range events {
+			eventMap[ev.EventID()] = ev
+		}
+	}
+	for roomID, eventIDs := range stateNeeded {
+		seen := make(map[gomatrixserverlib.StateKeyTuple]struct{}, len(eventIDs))
+		for eventID := range eventIDs {
+			ev, ok := eventMap[eventID]
+			if !ok || ev.StateKey() == nil || ev.RoomID().String() != roomID {
+				continue
+			}
+			tuple := gomatrixserverlib.StateKeyTuple{EventType: ev.Type(), StateKey: *ev.StateKey()}
+			if _, ok = seen[tuple]; ok {
+				continue
+			}
+			seen[tuple] = struct{}{}
+			result[roomID] = append(result[roomID], tuple)
+		}
+	}
+	return result, nil
 }
 
 func (d *DatabaseTransaction) RecentEvents(ctx context.Context, roomIDs []string, r types.Range, eventFilter *synctypes.RoomEventFilter, chronologicalOrder bool, onlySyncEvents bool) (map[string]types.RecentEvents, error) {

@@ -40,6 +40,18 @@ type StateDelta struct {
 	MembershipPos StreamPosition
 }
 
+// RoomMembership describes a user's current membership event in a room.
+type RoomMembership struct {
+	// The membership value, e.g. "join".
+	Membership string
+	// The event ID of the membership event.
+	EventID string
+	// The sender of the membership event.
+	Sender string
+	// The PDU stream position at which the membership event became part of the current state.
+	StreamPos StreamPosition
+}
+
 // StreamPosition represents the offset in the sync stream a client is at.
 type StreamPosition int64
 
