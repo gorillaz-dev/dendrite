@@ -176,6 +176,9 @@ type SendToDevice interface {
 	SelectSendToDeviceMessages(ctx context.Context, txn *sql.Tx, userID, deviceID string, from, to types.StreamPosition) (lastPos types.StreamPosition, events []types.SendToDeviceEvent, err error)
 	DeleteSendToDeviceMessages(ctx context.Context, txn *sql.Tx, userID, deviceID string, from types.StreamPosition) (err error)
 	SelectMaxSendToDeviceMessageID(ctx context.Context, txn *sql.Tx) (id int64, err error)
+	// SelectAllocatedSendToDeviceMessageID returns the highest ID ever allocated to a send-to-device
+	// message. Unlike SelectMaxSendToDeviceMessageID, it doesn't decrease when messages are deleted.
+	SelectAllocatedSendToDeviceMessageID(ctx context.Context, txn *sql.Tx) (id int64, err error)
 }
 
 type Filter interface {

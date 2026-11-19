@@ -32,7 +32,9 @@ const slidingSyncMaxBodySize = 1 << 20
 //
 // This function MUST be called in a dedicated goroutine for this request, as it
 // blocks until there is new data for the client or the timeout is reached.
-func (rp *RequestPool) OnIncomingSlidingSyncRequest(req *http.Request, device *userapi.Device) util.JSONResponse {
+//
+// On the unstable endpoint, extensions use the formats of the experimental implementations.
+func (rp *RequestPool) OnIncomingSlidingSyncRequest(req *http.Request, device *userapi.Device, unstableEndpoint bool) util.JSONResponse {
 	body, err := io.ReadAll(io.LimitReader(req.Body, slidingSyncMaxBodySize+1))
 	if err != nil {
 		return util.JSONResponse{
@@ -61,6 +63,10 @@ func (rp *RequestPool) OnIncomingSlidingSyncRequest(req *http.Request, device *u
 			JSON: spec.InvalidParam(err.Error()),
 		}
 	}
+	ext, errRes := parseSlidingSyncExtensions(ssReq.Extensions, unstableEndpoint)
+	if errRes != nil {
+		return *errRes
+	}
 
 	// Connections are scoped to the user and device, so that positions issued to
 	// another user or device are rejected.
@@ -87,6 +93,18 @@ func (rp *RequestPool) OnIncomingSlidingSyncRequest(req *http.Request, device *u
 	ctx := req.Context()
 	logger := util.GetLogger(ctx).WithField("conn_id", ssReq.ConnID)
 
+	// Sending a to-device `since` acknowledges the messages up to that position.
+	if err = rp.acknowledgeToDevice(ctx, device, ext); err != nil {
+		if err == errSlidingSyncInvalidSince {
+			return *invalidSinceResponse()
+		}
+		logger.WithError(err).Error("Failed to acknowledge to-device messages")
+		return util.JSONResponse{
+			Code: http.StatusInternalServerError,
+			JSON: spec.InternalServerError{},
+		}
+	}
+
 	// The timeout is ignored for the first request of a connection.
 	timeout := time.Duration(ssReq.Timeout) * time.Millisecond
 	if ssReq.Pos == "" {
@@ -98,7 +116,7 @@ func (rp *RequestPool) OnIncomingSlidingSyncRequest(req *http.Request, device *u
 	since := base.token
 	for {
 		currentPos := rp.Notifier.CurrentPosition()
-		res, rooms, listCounts, changed, err := rp.slidingSyncResponse(ctx, conn, device, base, &ssReq, &currentPos)
+		res, rooms, listCounts, changed, err := rp.slidingSyncResponse(ctx, conn, device, base, &ssReq, ext, &currentPos)
 		if err != nil {
 			if ctx.Err() != nil {
 				return util.JSONResponse{Code: http.StatusOK, JSON: types.NewSlidingSyncResponse()}
@@ -109,7 +127,7 @@ func (rp *RequestPool) OnIncomingSlidingSyncRequest(req *http.Request, device *u
 				JSON: spec.InternalServerError{},
 			}
 		}
-		if changed || timeout <= 0 || !rp.waitForSlidingSyncUpdates(ctx, timer, device, &since, currentPos) {
+		if changed || timeout <= 0 || !rp.waitForSlidingSyncUpdates(ctx, timer, device, ext, &since, currentPos) {
 			if ctx.Err() != nil {
 				// The client gave up, so the response will never be processed.
 				return util.JSONResponse{Code: http.StatusOK, JSON: types.NewSlidingSyncResponse()}
@@ -123,7 +141,8 @@ func (rp *RequestPool) OnIncomingSlidingSyncRequest(req *http.Request, device *u
 // waitForSlidingSyncUpdates waits until there may be new data relevant to sliding sync.
 // Returns false if the timeout was reached or the client gave up.
 func (rp *RequestPool) waitForSlidingSyncUpdates(
-	ctx context.Context, timer *time.Timer, device *userapi.Device, since *types.StreamingToken, currentPos types.StreamingToken,
+	ctx context.Context, timer *time.Timer, device *userapi.Device, ext *slidingSyncExtensions,
+	since *types.StreamingToken, currentPos types.StreamingToken,
 ) bool {
 	since.ApplyUpdates(currentPos)
 	listener := rp.Notifier.GetListener(types.SyncRequest{Context: ctx, Device: device})
@@ -138,11 +157,14 @@ func (rp *RequestPool) waitForSlidingSyncUpdates(
 			return false
 		case <-listener.GetNotifyChannel(*since):
 			newPos := listener.GetSyncPosition()
-			// Only room events, invites and account data (for DM and tag filters) affect the
-			// response. Ignore updates of other streams, e.g. typing notifications.
+			// Only room events, invites, account data (for DM and tag filters) and the streams
+			// of enabled extensions affect the response. Ignore updates of other streams,
+			// e.g. typing notifications.
 			relevant := newPos.PDUPosition > since.PDUPosition ||
 				newPos.InvitePosition > since.InvitePosition ||
-				newPos.AccountDataPosition > since.AccountDataPosition
+				newPos.AccountDataPosition > since.AccountDataPosition ||
+				(ext.toDeviceKey != "" && newPos.SendToDevicePosition > since.SendToDevicePosition) ||
+				(ext.e2eeKey != "" && newPos.DeviceListPosition > since.DeviceListPosition)
 			since.ApplyUpdates(newPos)
 			if relevant {
 				return true
@@ -157,7 +179,7 @@ func (rp *RequestPool) waitForSlidingSyncUpdates(
 // nolint:gocyclo
 func (rp *RequestPool) slidingSyncResponse(
 	ctx context.Context, conn *slidingSyncConnection, device *userapi.Device, base *slidingSyncSnapshot,
-	ssReq *types.SlidingSyncRequest, currentPos *types.StreamingToken,
+	ssReq *types.SlidingSyncRequest, ext *slidingSyncExtensions, currentPos *types.StreamingToken,
 ) (res *types.SlidingSyncResponse, rooms map[string]*slidingSyncRoomState, listCounts map[string]int, changed bool, err error) {
 	snapshot, err := rp.db.NewDatabaseSnapshot(ctx)
 	if err != nil {
@@ -287,6 +309,12 @@ func (rp *RequestPool) slidingSyncResponse(
 			changed = true
 		}
 	}
+
+	extensionsChanged, extErr := rp.extensionResults(ctx, snapshot, device, base, ext, *currentPos, res)
+	if extErr != nil {
+		return nil, nil, nil, false, fmt.Errorf("extensions: %w", extErr)
+	}
+	changed = changed || extensionsChanged
 	succeeded = true
 	return res, rooms, listCounts, changed, nil
 }

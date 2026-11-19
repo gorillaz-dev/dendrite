@@ -48,11 +48,16 @@ func Setup(
 
 	if enableSlidingSync {
 		// Simplified sliding sync (MSC4186)
-		slidingSyncHandler := httputil.MakeAuthAPI("sliding_sync", userAPI, func(req *http.Request, device *userapi.Device) util.JSONResponse {
-			return srp.OnIncomingSlidingSyncRequest(req, device)
-		}, httputil.WithAllowGuests())
-		csMux.Handle("/unstable/org.matrix.simplified_msc3575/sync", slidingSyncHandler).Methods(http.MethodPost, http.MethodOptions)
-		csMux.Handle("/v4/sync", slidingSyncHandler).Methods(http.MethodPost, http.MethodOptions)
+		csMux.Handle("/unstable/org.matrix.simplified_msc3575/sync",
+			httputil.MakeAuthAPI("sliding_sync", userAPI, func(req *http.Request, device *userapi.Device) util.JSONResponse {
+				return srp.OnIncomingSlidingSyncRequest(req, device, true)
+			}, httputil.WithAllowGuests()),
+		).Methods(http.MethodPost, http.MethodOptions)
+		csMux.Handle("/v4/sync",
+			httputil.MakeAuthAPI("sliding_sync", userAPI, func(req *http.Request, device *userapi.Device) util.JSONResponse {
+				return srp.OnIncomingSlidingSyncRequest(req, device, false)
+			}, httputil.WithAllowGuests()),
+		).Methods(http.MethodPost, http.MethodOptions)
 	}
 
 	v3mux.Handle("/rooms/{roomID}/messages", httputil.MakeAuthAPI("room_messages", userAPI, func(req *http.Request, device *userapi.Device) util.JSONResponse {

@@ -189,3 +189,45 @@ func withRollbackSnapshot(t *testing.T, db storage.Database, f func(snapshot sto
 	defer snapshot.Rollback() // nolint:errcheck
 	f(snapshot)
 }
+
+func TestAllocatedSendToDevicePosition(t *testing.T) {
+	test.WithAllDatabases(t, func(t *testing.T, dbType test.DBType) {
+		db, closeDB := MustCreateDatabase(t, dbType)
+		defer closeDB()
+
+		withRollbackSnapshot(t, db, func(snapshot storage.DatabaseTransaction) {
+			pos, err := snapshot.AllocatedSendToDevicePosition(ctx)
+			if err != nil || pos != 0 {
+				t.Fatalf("got position %d (err %v), want 0", pos, err)
+			}
+		})
+
+		var last types.StreamPosition
+		for i := 0; i < 2; i++ {
+			var err error
+			last, err = db.StoreNewSendForDeviceMessage(ctx, "@alice:test", "ALICE", gomatrixserverlib.SendToDeviceEvent{
+				Sender: "@alice:test", Type: "m.test", Content: []byte(`{}`),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Deleting the messages doesn't decrease the allocated position.
+		if err := db.CleanSendToDeviceUpdates(ctx, "@alice:test", "ALICE", last); err != nil {
+			t.Fatal(err)
+		}
+		withRollbackSnapshot(t, db, func(snapshot storage.DatabaseTransaction) {
+			maxPos, err := snapshot.MaxStreamPositionForSendToDeviceMessages(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			allocated, err := snapshot.AllocatedSendToDevicePosition(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if allocated != last || maxPos >= last {
+				t.Fatalf("got allocated position %d and max position %d, want %d and less", allocated, maxPos, last)
+			}
+		})
+	})
+}

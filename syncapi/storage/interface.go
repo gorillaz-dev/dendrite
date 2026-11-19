@@ -101,6 +101,9 @@ type DatabaseTransaction interface {
 	// SendToDeviceUpdatesForSync returns a list of send-to-device updates. It returns the
 	// relevant events within the given ranges for the supplied user ID and device ID.
 	SendToDeviceUpdatesForSync(ctx context.Context, userID, deviceID string, from, to types.StreamPosition) (pos types.StreamPosition, events []types.SendToDeviceEvent, err error)
+	// AllocatedSendToDevicePosition returns the highest position ever allocated to a send-to-device message.
+	// Unlike MaxStreamPositionForSendToDeviceMessages, it doesn't decrease when messages are deleted.
+	AllocatedSendToDevicePosition(ctx context.Context) (types.StreamPosition, error)
 	// GetRoomReceipts gets all receipts for a given roomID
 	GetRoomReceipts(ctx context.Context, roomIDs []string, streamPos types.StreamPosition) ([]types.OutputReceiptEvent, error)
 	SelectContextEvent(ctx context.Context, roomID, eventID string) (int, rstypes.HeaderedEvent, error)

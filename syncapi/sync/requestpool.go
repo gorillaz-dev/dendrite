@@ -29,6 +29,7 @@ import (
 	"github.com/element-hq/dendrite/syncapi/notifier"
 	"github.com/element-hq/dendrite/syncapi/storage"
 	"github.com/element-hq/dendrite/syncapi/streams"
+	"github.com/element-hq/dendrite/syncapi/synctypes"
 	"github.com/element-hq/dendrite/syncapi/types"
 	userapi "github.com/element-hq/dendrite/userapi/api"
 )
@@ -574,26 +575,18 @@ func (rp *RequestPool) OnIncomingKeyChangeRequest(req *http.Request, device *use
 			JSON: spec.InvalidParam("missing ?from= or ?to="),
 		}
 	}
-	fromToken, err := types.NewStreamTokenFromString(from)
+	fromToken, err := parseKeyChangesToken(from)
 	if err != nil {
 		return util.JSONResponse{
 			Code: 400,
 			JSON: spec.InvalidParam("bad 'from' value"),
 		}
 	}
-	toToken, err := types.NewStreamTokenFromString(to)
+	toToken, err := parseKeyChangesToken(to)
 	if err != nil {
 		return util.JSONResponse{
 			Code: 400,
 			JSON: spec.InvalidParam("bad 'to' value"),
-		}
-	}
-	syncReq, err := newSyncRequest(req, *device, rp.db)
-	if err != nil {
-		util.GetLogger(req.Context()).WithError(err).Error("newSyncRequest failed")
-		return util.JSONResponse{
-			Code: http.StatusInternalServerError,
-			JSON: spec.InternalServerError{},
 		}
 	}
 	snapshot, err := rp.db.NewDatabaseSnapshot(req.Context())
@@ -606,11 +599,7 @@ func (rp *RequestPool) OnIncomingKeyChangeRequest(req *http.Request, device *use
 	}
 	var succeeded bool
 	defer sqlutil.EndTransactionWithCheck(snapshot, &succeeded, &err)
-	rp.streams.PDUStreamProvider.IncrementalSync(req.Context(), snapshot, syncReq, fromToken.PDUPosition, toToken.PDUPosition)
-	_, _, err = internal.DeviceListCatchup(
-		req.Context(), snapshot, rp.userAPI, rp.rsAPI, syncReq.Device.UserID,
-		syncReq.Response, fromToken.DeviceListPosition, toToken.DeviceListPosition,
-	)
+	deviceLists, err := rp.deviceListChanges(req.Context(), snapshot, device, fromToken, toToken)
 	if err != nil {
 		util.GetLogger(req.Context()).WithError(err).Error("Failed to DeviceListCatchup info")
 		return util.JSONResponse{
@@ -625,10 +614,52 @@ func (rp *RequestPool) OnIncomingKeyChangeRequest(req *http.Request, device *use
 			Changed []string `json:"changed"`
 			Left    []string `json:"left"`
 		}{
-			Changed: syncReq.Response.DeviceLists.Changed,
-			Left:    syncReq.Response.DeviceLists.Left,
+			Changed: deviceLists.Changed,
+			Left:    deviceLists.Left,
 		},
 	}
+}
+
+// parseKeyChangesToken parses a /keys/changes token, which is either a /sync stream token
+// or a sliding sync position (MSC4543).
+func parseKeyChangesToken(token string) (types.StreamingToken, error) {
+	streamToken, err := types.NewStreamTokenFromString(token)
+	if err == nil {
+		return streamToken, nil
+	}
+	if pos, posErr := types.NewSlidingSyncPositionFromString(token); posErr == nil {
+		return pos.StreamToken, nil
+	}
+	return streamToken, err
+}
+
+// deviceListChanges returns the users whose device lists changed between the two tokens, and the
+// users the device's user no longer shares a room with, as in device_lists of a /sync response.
+func (rp *RequestPool) deviceListChanges(
+	ctx context.Context, snapshot storage.DatabaseTransaction, device *userapi.Device, from, to types.StreamingToken,
+) (*types.DeviceLists, error) {
+	// The device list catch-up needs the membership changes between the two tokens.
+	syncReq := &types.SyncRequest{
+		Context:           ctx,
+		Log:               util.GetLogger(ctx),
+		Device:            device,
+		Response:          types.NewResponse(),
+		Filter:            synctypes.DefaultFilter(),
+		Since:             from,
+		Rooms:             make(map[string]string),
+		MembershipChanges: make(map[string]struct{}),
+	}
+	if from.PDUPosition != to.PDUPosition {
+		rp.streams.PDUStreamProvider.IncrementalSync(ctx, snapshot, syncReq, from.PDUPosition, to.PDUPosition)
+	}
+	_, _, err := internal.DeviceListCatchup(
+		ctx, snapshot, rp.userAPI, rp.rsAPI, device.UserID,
+		syncReq.Response, from.DeviceListPosition, to.DeviceListPosition,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return syncReq.Response.DeviceLists, nil
 }
 
 // shouldReturnImmediately returns whether the /sync request is an initial sync,

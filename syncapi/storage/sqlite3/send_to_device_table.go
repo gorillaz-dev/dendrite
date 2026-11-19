@@ -55,12 +55,18 @@ const deleteSendToDeviceMessagesSQL = `
 const selectMaxSendToDeviceIDSQL = "" +
 	"SELECT MAX(id) FROM syncapi_send_to_device"
 
+// selectAllocatedSendToDeviceIDSQL returns the highest ID ever allocated to a send-to-device message,
+// which unlike the highest ID in the table doesn't decrease when messages are deleted.
+const selectAllocatedSendToDeviceIDSQL = "" +
+	"SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'syncapi_send_to_device'), 0)"
+
 type sendToDeviceStatements struct {
 	db                             *sql.DB
 	insertSendToDeviceMessageStmt  *sql.Stmt
 	selectSendToDeviceMessagesStmt *sql.Stmt
 	deleteSendToDeviceMessagesStmt *sql.Stmt
 	selectMaxSendToDeviceIDStmt    *sql.Stmt
+	selectAllocatedIDStmt          *sql.Stmt
 }
 
 func NewSqliteSendToDeviceTable(db *sql.DB) (tables.SendToDevice, error) {
@@ -85,6 +91,7 @@ func NewSqliteSendToDeviceTable(db *sql.DB) (tables.SendToDevice, error) {
 		{&s.selectSendToDeviceMessagesStmt, selectSendToDeviceMessagesSQL},
 		{&s.deleteSendToDeviceMessagesStmt, deleteSendToDeviceMessagesSQL},
 		{&s.selectMaxSendToDeviceIDStmt, selectMaxSendToDeviceIDSQL},
+		{&s.selectAllocatedIDStmt, selectAllocatedSendToDeviceIDSQL},
 	}.Prepare(db)
 }
 
@@ -153,5 +160,13 @@ func (s *sendToDeviceStatements) SelectMaxSendToDeviceMessageID(
 	if nullableID.Valid {
 		id = nullableID.Int64
 	}
+	return
+}
+
+// SelectAllocatedSendToDeviceMessageID returns the highest ID ever allocated to a send-to-device message.
+func (s *sendToDeviceStatements) SelectAllocatedSendToDeviceMessageID(
+	ctx context.Context, txn *sql.Tx,
+) (id int64, err error) {
+	err = sqlutil.TxStmt(txn, s.selectAllocatedIDStmt).QueryRowContext(ctx).Scan(&id)
 	return
 }

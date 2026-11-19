@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -288,5 +289,76 @@ func TestRequiredStateConfigsEqual(t *testing.T) {
 	}
 	if !requiredStateConfigsEqual(nil, nil) {
 		t.Error("expected empty configs to be equal")
+	}
+}
+
+func TestParseSlidingSyncExtensions(t *testing.T) {
+	testCases := []struct {
+		name         string
+		extensions   string
+		unstable     bool
+		wantErrCode  spec.MatrixErrorCode
+		wantToDevice string
+		wantLimit    int
+		wantSince    *types.StreamPosition
+		wantE2EE     string
+	}{
+		{name: "none", extensions: `{}`},
+		{name: "unknown extensions are ignored", extensions: `{"foo": {"enabled": true}, "typing": 5}`},
+		{name: "disabled", extensions: `{"to_device": {"enabled": false}, "e2ee": {}}`},
+		{
+			name: "defaults", extensions: `{"to_device": {"enabled": true}, "e2ee": {"enabled": true}}`,
+			wantToDevice: "to_device", wantLimit: types.SlidingSyncDefaultToDeviceLimit, wantE2EE: "e2ee",
+		},
+		{
+			name: "limit and since", extensions: `{"to_device": {"enabled": true, "limit": 5, "since": "42"}}`,
+			wantToDevice: "to_device", wantLimit: 5, wantSince: func() *types.StreamPosition { p := types.StreamPosition(42); return &p }(),
+		},
+		{
+			name: "limit is capped", extensions: `{"to_device": {"enabled": true, "limit": 100000}}`,
+			wantToDevice: "to_device", wantLimit: types.SlidingSyncMaxToDeviceLimit,
+		},
+		{
+			name: "unstable keys on the stable endpoint", extensions: `{"org.matrix.msc4538.to_device": {"enabled": true}, "org.matrix.msc4543.e2ee": {"enabled": true}}`,
+			wantToDevice: types.SlidingSyncExtensionToDeviceUnstable, wantLimit: types.SlidingSyncDefaultToDeviceLimit, wantE2EE: types.SlidingSyncExtensionE2EEUnstable,
+		},
+		{
+			name: "unstable keys are not used on the unstable endpoint", unstable: true,
+			extensions: `{"org.matrix.msc4538.to_device": {"enabled": true}, "org.matrix.msc4543.e2ee": {"enabled": true}}`,
+		},
+		{name: "zero limit", extensions: `{"to_device": {"enabled": true, "limit": 0}}`, wantErrCode: spec.ErrorBadJSON},
+		{name: "negative limit", extensions: `{"to_device": {"enabled": true, "limit": -1}}`, wantErrCode: spec.ErrorBadJSON},
+		{name: "malformed config", extensions: `{"to_device": {"enabled": "yes"}}`, wantErrCode: spec.ErrorBadJSON},
+		{name: "malformed e2ee config", extensions: `{"e2ee": []}`, wantErrCode: spec.ErrorBadJSON},
+		{name: "non-numeric since", extensions: `{"to_device": {"enabled": true, "since": "abc"}}`, wantErrCode: spec.ErrorInvalidParam},
+		{name: "negative since", extensions: `{"to_device": {"enabled": true, "since": "-1"}}`, wantErrCode: spec.ErrorInvalidParam},
+		{name: "non-canonical since", extensions: `{"to_device": {"enabled": true, "since": "+1"}}`, wantErrCode: spec.ErrorInvalidParam},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(tc.extensions), &raw); err != nil {
+				t.Fatal(err)
+			}
+			ext, errRes := parseSlidingSyncExtensions(raw, tc.unstable)
+			if tc.wantErrCode != "" {
+				if errRes == nil {
+					t.Fatalf("expected error %s", tc.wantErrCode)
+				}
+				if got := errRes.JSON.(spec.MatrixError).ErrCode; errRes.Code != 400 || got != tc.wantErrCode {
+					t.Fatalf("got HTTP %d %s, want 400 %s", errRes.Code, got, tc.wantErrCode)
+				}
+				return
+			}
+			if errRes != nil {
+				t.Fatalf("unexpected error: %+v", errRes.JSON)
+			}
+			if ext.toDeviceKey != tc.wantToDevice || ext.toDeviceLimit != tc.wantLimit || ext.e2eeKey != tc.wantE2EE {
+				t.Fatalf("got %+v", ext)
+			}
+			if (ext.toDeviceSince == nil) != (tc.wantSince == nil) || (ext.toDeviceSince != nil && *ext.toDeviceSince != *tc.wantSince) {
+				t.Fatalf("got since %v, want %v", ext.toDeviceSince, tc.wantSince)
+			}
+		})
 	}
 }

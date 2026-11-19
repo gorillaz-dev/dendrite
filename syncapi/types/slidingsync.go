@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/matrix-org/gomatrixserverlib"
 	"github.com/matrix-org/gomatrixserverlib/spec"
 
 	"github.com/element-hq/dendrite/syncapi/synctypes"
@@ -46,7 +47,7 @@ type SlidingSyncRequest struct {
 	SetPresence       string                                 `json:"set_presence,omitempty"`
 	Lists             map[string]SlidingSyncListConfig       `json:"lists,omitempty"`
 	RoomSubscriptions map[string]SlidingSyncRoomSubscription `json:"room_subscriptions,omitempty"`
-	// Extensions are not specified by MSC4186 itself. They are accepted but ignored.
+	// Extensions are defined by other MSCs. Unknown extensions are ignored.
 	Extensions map[string]json.RawMessage `json:"extensions,omitempty"`
 }
 
@@ -319,4 +320,51 @@ func (n *NullableString) UnmarshalJSON(data []byte) error {
 	}
 	n.Value = &s
 	return nil
+}
+
+// Extension keys. The to-device extension is defined by MSC4538 and the end-to-end
+// encryption extension by MSC4543. The prefixed keys are the unstable keys of these
+// MSCs on the stable sliding sync endpoint.
+const (
+	SlidingSyncExtensionToDevice         = "to_device"
+	SlidingSyncExtensionToDeviceUnstable = "org.matrix.msc4538.to_device"
+	SlidingSyncExtensionE2EE             = "e2ee"
+	SlidingSyncExtensionE2EEUnstable     = "org.matrix.msc4543.e2ee"
+
+	// SlidingSyncDefaultToDeviceLimit is the default number of to-device messages returned per response.
+	SlidingSyncDefaultToDeviceLimit = 100
+	// SlidingSyncMaxToDeviceLimit is the maximum number of to-device messages returned per response.
+	SlidingSyncMaxToDeviceLimit = 1000
+)
+
+// SlidingSyncToDeviceRequest is the configuration of the to-device extension (MSC4538).
+type SlidingSyncToDeviceRequest struct {
+	Enabled bool    `json:"enabled"`
+	Limit   *int    `json:"limit,omitempty"`
+	Since   *string `json:"since,omitempty"`
+}
+
+// SlidingSyncToDeviceResponse is the result of the to-device extension (MSC4538).
+type SlidingSyncToDeviceResponse struct {
+	NextBatch string                                `json:"next_batch"`
+	Messages  []gomatrixserverlib.SendToDeviceEvent `json:"messages"`
+}
+
+// SlidingSyncToDeviceLegacyResponse is the result of the to-device extension on the unstable
+// endpoint, which uses the format of the experimental implementations for compatibility.
+type SlidingSyncToDeviceLegacyResponse struct {
+	NextBatch string                                `json:"next_batch"`
+	Events    []gomatrixserverlib.SendToDeviceEvent `json:"events"`
+}
+
+// SlidingSyncE2EERequest is the configuration of the end-to-end encryption extension (MSC4543).
+type SlidingSyncE2EERequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// SlidingSyncE2EEResponse is the result of the end-to-end encryption extension (MSC4543).
+type SlidingSyncE2EEResponse struct {
+	DeviceLists                  *DeviceLists   `json:"device_lists,omitempty"`
+	DeviceOneTimeKeysCount       map[string]int `json:"device_one_time_keys_count"`
+	DeviceUnusedFallbackKeyTypes []string       `json:"device_unused_fallback_key_types"`
 }

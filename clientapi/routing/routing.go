@@ -94,6 +94,11 @@ func Setup(
 	if cfg.MSCs.Enabled("msc4186") {
 		// Simplified sliding sync uses its own unstable feature flag.
 		unstableFeatures["org.matrix.simplified_msc3575"] = true
+		// Sliding sync extensions for to-device messages and end-to-end encryption.
+		unstableFeatures["org.matrix.msc4538"] = true
+		unstableFeatures["org.matrix.msc4538.stable"] = true
+		unstableFeatures["org.matrix.msc4543"] = true
+		unstableFeatures["org.matrix.msc4543.stable"] = true
 	}
 
 	// singleflight protects /join endpoints from being invoked

@@ -16,6 +16,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/tidwall/gjson"
 
+	"github.com/element-hq/dendrite/clientapi/producers"
 	"github.com/element-hq/dendrite/internal/caching"
 	"github.com/element-hq/dendrite/internal/httputil"
 	"github.com/element-hq/dendrite/internal/sqlutil"
@@ -23,6 +24,7 @@ import (
 	rstypes "github.com/element-hq/dendrite/roomserver/types"
 	"github.com/element-hq/dendrite/setup/config"
 	"github.com/element-hq/dendrite/setup/jetstream"
+	"github.com/element-hq/dendrite/syncapi/types"
 	"github.com/element-hq/dendrite/test"
 	"github.com/element-hq/dendrite/test/testrig"
 	userapi "github.com/element-hq/dendrite/userapi/api"
@@ -67,6 +69,14 @@ type slidingSyncUserAPI struct {
 	syncUserAPI
 	globalAccountData map[string]json.RawMessage
 	roomAccountData   map[string]map[string]json.RawMessage
+	otkCounts         map[string]int
+	fallbackKeyTypes  []string
+}
+
+func (s *slidingSyncUserAPI) QueryOneTimeKeys(ctx context.Context, req *userapi.QueryOneTimeKeysRequest, res *userapi.QueryOneTimeKeysResponse) error {
+	res.Count = userapi.OneTimeKeysCount{UserID: req.UserID, DeviceID: req.DeviceID, KeyCount: s.otkCounts}
+	res.UnusedFallbackAlgorithms = s.fallbackKeyTypes
+	return nil
 }
 
 func (s *slidingSyncUserAPI) QueryAccountData(ctx context.Context, req *userapi.QueryAccountDataRequest, res *userapi.QueryAccountDataResponse) error {
@@ -131,11 +141,17 @@ func (s *slidingSyncTest) publishInvite(invite *rstypes.HeaderedEvent) {
 // request sends a sliding sync request and returns the status code and body.
 func (s *slidingSyncTest) request(accessToken string, body any) (int, gjson.Result) {
 	s.t.Helper()
+	return s.requestPath(slidingSyncPath, accessToken, body)
+}
+
+// requestPath sends a sliding sync request to the given path.
+func (s *slidingSyncTest) requestPath(path, accessToken string, body any) (int, gjson.Result) {
+	s.t.Helper()
 	data, err := json.Marshal(body)
 	if err != nil {
 		s.t.Fatalf("failed to marshal body: %s", err)
 	}
-	req := httptest.NewRequest(http.MethodPost, slidingSyncPath, bytes.NewReader(data))
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(data))
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	w := httptest.NewRecorder()
 	s.routers.Client.ServeHTTP(w, req)
@@ -673,4 +689,282 @@ func TestSlidingSyncKickedAndBanned(t *testing.T) {
 			t.Fatalf("expected alice's membership in required_state: %s", kicked.Raw)
 		}
 	})
+}
+
+const slidingSyncStablePath = "/_matrix/client/v4/sync"
+
+func toDeviceRequest(key string, limit int, since string) map[string]any {
+	cfg := map[string]any{"enabled": true, "limit": limit}
+	if since != "" {
+		cfg["since"] = since
+	}
+	return map[string]any{"extensions": map[string]any{key: cfg}}
+}
+
+func messageBodies(messages gjson.Result) []string {
+	var bodies []string
+	for _, msg := range messages.Array() {
+		bodies = append(bodies, msg.Get("content.body").Str)
+	}
+	return bodies
+}
+
+func TestSlidingSyncToDevice(t *testing.T) {
+	test.WithAllDatabases(t, func(t *testing.T, dbType test.DBType) {
+		testSlidingSyncToDevice(t, dbType)
+	})
+}
+
+// nolint:gocyclo
+func testSlidingSyncToDevice(t *testing.T, dbType test.DBType) {
+	alice := test.NewUser(t)
+	aliceDev := newTestDevice(alice, "ALICE")
+	aliceDev2 := newTestDevice(alice, "ALICE2")
+	userAPI := &slidingSyncUserAPI{syncUserAPI: syncUserAPI{accounts: []userapi.Device{aliceDev, aliceDev2}}}
+	s := newSlidingSyncTest(t, dbType, true, userAPI)
+	producer := producers.SyncAPIProducer{
+		TopicSendToDeviceEvent: s.cfg.Global.JetStream.Prefixed(jetstream.OutputSendToDeviceEvent),
+		JetStream:              s.jsctx,
+	}
+	sendMessage := func(body string) {
+		t.Helper()
+		msg := json.RawMessage(fmt.Sprintf(`{"body": %q}`, body))
+		if err := producer.SendToDevice(context.Background(), alice.ID, alice.ID, aliceDev.ID, "m.dendrite.test", msg); err != nil {
+			t.Fatalf("failed to send to-device message: %s", err)
+		}
+	}
+	stable := func(token string, body any) (int, gjson.Result) {
+		return s.requestPath(slidingSyncStablePath, token, body)
+	}
+	mustStable := func(token string, body any) gjson.Result {
+		t.Helper()
+		code, res := stable(token, body)
+		if code != http.StatusOK {
+			t.Fatalf("got HTTP %d, want 200: %s", code, res.Raw)
+		}
+		return res
+	}
+
+	// Without messages, the section is omitted on the stable endpoint...
+	res := mustStable(aliceDev.AccessToken, toDeviceRequest("to_device", 2, ""))
+	if res.Get("extensions.to_device").Exists() {
+		t.Fatalf("expected no to_device section: %s", res.Raw)
+	}
+	// ...but always included on the unstable endpoint, using the legacy format.
+	res = s.mustRequest(aliceDev.AccessToken, toDeviceRequest("to_device", 2, ""))
+	if !res.Get("extensions.to_device.next_batch").Exists() || !res.Get("extensions.to_device.events").IsArray() {
+		t.Fatalf("expected legacy to_device section: %s", res.Raw)
+	}
+
+	sendMessage("message 1")
+	sendMessage("message 2")
+	sendMessage("message 3")
+
+	// Wait until all messages have arrived. The limit is respected.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res = mustStable(aliceDev.AccessToken, toDeviceRequest("to_device", 10, ""))
+		if len(res.Get("extensions.to_device.messages").Array()) == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for to-device messages: %s", res.Raw)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	res = mustStable(aliceDev.AccessToken, toDeviceRequest("to_device", 2, ""))
+	section := res.Get("extensions.to_device")
+	if bodies := messageBodies(section.Get("messages")); fmt.Sprint(bodies) != "[message 1 message 2]" {
+		t.Fatalf("unexpected messages %v: %s", bodies, res.Raw)
+	}
+	if msg := section.Get("messages.0"); msg.Get("sender").Str != alice.ID || msg.Get("type").Str != "m.dendrite.test" {
+		t.Fatalf("unexpected message format: %s", msg.Raw)
+	}
+	nextBatch := section.Get("next_batch").Str
+
+	// Retrying without acknowledging returns the same messages again.
+	res = mustStable(aliceDev.AccessToken, toDeviceRequest("to_device", 2, ""))
+	if bodies := messageBodies(res.Get("extensions.to_device.messages")); fmt.Sprint(bodies) != "[message 1 message 2]" {
+		t.Fatalf("expected the same messages on retry, got %v", bodies)
+	}
+
+	// Another device of the same user can't see or acknowledge the messages.
+	res = mustStable(aliceDev2.AccessToken, toDeviceRequest("to_device", 10, nextBatch))
+	if res.Get("extensions.to_device").Exists() {
+		t.Fatalf("other device must not receive the messages: %s", res.Raw)
+	}
+
+	// The prefixed key of MSC4538 can be used on the stable endpoint, and since acknowledges
+	// the messages up to that position.
+	res = mustStable(aliceDev.AccessToken, toDeviceRequest(types.SlidingSyncExtensionToDeviceUnstable, 10, nextBatch))
+	section = res.Get(fmt.Sprintf("extensions.%s", gjson.Escape(types.SlidingSyncExtensionToDeviceUnstable)))
+	if bodies := messageBodies(section.Get("messages")); fmt.Sprint(bodies) != "[message 3]" {
+		t.Fatalf("unexpected messages %v: %s", bodies, res.Raw)
+	}
+	// Acknowledged messages are never returned again, not even without since.
+	res = mustStable(aliceDev.AccessToken, toDeviceRequest("to_device", 10, ""))
+	if bodies := messageBodies(res.Get("extensions.to_device.messages")); fmt.Sprint(bodies) != "[message 3]" {
+		t.Fatalf("acknowledged messages were returned again: %v", bodies)
+	}
+	nextBatch = section.Get("next_batch").Str
+
+	// Acknowledging everything leaves nothing to return, and the token stays valid.
+	res = mustStable(aliceDev.AccessToken, toDeviceRequest("to_device", 10, nextBatch))
+	if res.Get("extensions.to_device").Exists() {
+		t.Fatalf("expected no messages: %s", res.Raw)
+	}
+	res = mustStable(aliceDev.AccessToken, toDeviceRequest("to_device", 10, nextBatch))
+	if res.Get("extensions.to_device").Exists() {
+		t.Fatalf("expected no messages: %s", res.Raw)
+	}
+
+	// Invalid parameters are rejected.
+	for _, tc := range []struct {
+		body    map[string]any
+		errcode spec.MatrixErrorCode
+	}{
+		{toDeviceRequest("to_device", 0, ""), spec.ErrorBadJSON},
+		{toDeviceRequest("to_device", 10, "abc"), spec.ErrorInvalidParam},
+		{toDeviceRequest("to_device", 10, "999999999"), spec.ErrorInvalidParam},
+	} {
+		code, errRes := stable(aliceDev.AccessToken, tc.body)
+		if code != http.StatusBadRequest || errRes.Get("errcode").Str != string(tc.errcode) {
+			t.Fatalf("got HTTP %d %s, want 400 %s", code, errRes.Raw, tc.errcode)
+		}
+	}
+
+	// A new message wakes up a long-polling request.
+	req := toDeviceRequest("to_device", 10, nextBatch)
+	req["conn_id"] = "poll"
+	pos := mustStable(aliceDev.AccessToken, req).Get("pos").Str
+	req["pos"] = pos
+	req["timeout"] = 10000
+	done := make(chan gjson.Result)
+	go func() {
+		_, r := stable(aliceDev.AccessToken, req)
+		done <- r
+	}()
+	time.Sleep(200 * time.Millisecond)
+	sendMessage("message 4")
+	select {
+	case res = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("timed out waiting for long-poll")
+	}
+	if bodies := messageBodies(res.Get("extensions.to_device.messages")); fmt.Sprint(bodies) != "[message 4]" {
+		t.Fatalf("unexpected messages %v: %s", bodies, res.Raw)
+	}
+}
+
+func TestSlidingSyncE2EE(t *testing.T) {
+	test.WithAllDatabases(t, func(t *testing.T, dbType test.DBType) {
+		testSlidingSyncE2EE(t, dbType)
+	})
+}
+
+// nolint:gocyclo
+func testSlidingSyncE2EE(t *testing.T, dbType test.DBType) {
+	alice := test.NewUser(t)
+	bob := test.NewUser(t)
+	aliceDev := newTestDevice(alice, "ALICE")
+	room := test.NewRoom(t, alice, test.RoomPreset(test.PresetPublicChat))
+	userAPI := &slidingSyncUserAPI{
+		syncUserAPI:      syncUserAPI{accounts: []userapi.Device{aliceDev}},
+		otkCounts:        map[string]int{"signed_curve25519": 50},
+		fallbackKeyTypes: []string{"signed_curve25519"},
+	}
+	s := newSlidingSyncTest(t, dbType, true, userAPI, room)
+	s.publish(room.Events()...)
+	lastEvent := room.Events()[len(room.Events())-1]
+	roomListReq := listRequest("", 0, 1, map[string]any{})
+	s.waitFor(aliceDev.AccessToken, roomListReq, func(r gjson.Result) bool {
+		return r.Get(fmt.Sprintf("rooms.%s.timeline.0.event_id", gjson.Escape(room.ID))).Str == lastEvent.EventID()
+	})
+
+	req := map[string]any{"conn_id": "e2ee", "extensions": map[string]any{"e2ee": map[string]any{"enabled": true}}}
+	// The response to a request without pos contains the key state, but no device lists.
+	res := s.mustRequest(aliceDev.AccessToken, req)
+	section := res.Get("extensions.e2ee")
+	if section.Get("device_one_time_keys_count.signed_curve25519").Int() != 50 ||
+		section.Get("device_unused_fallback_key_types.0").Str != "signed_curve25519" {
+		t.Fatalf("expected key state: %s", res.Raw)
+	}
+	if section.Get("device_lists").Exists() {
+		t.Fatalf("expected no device lists without pos: %s", res.Raw)
+	}
+	pos1 := res.Get("pos").Str
+
+	// Nothing changed, so a long-polling request times out. The key state is still included.
+	req["pos"] = pos1
+	req["timeout"] = 200
+	res = s.mustRequest(aliceDev.AccessToken, req)
+	if res.Get("extensions.e2ee.device_lists").Exists() || !res.Get("extensions.e2ee.device_one_time_keys_count").Exists() {
+		t.Fatalf("unexpected e2ee section: %s", res.Raw)
+	}
+	pos1 = res.Get("pos").Str
+
+	// Bob joining a room alice is in wakes up the request, and bob is reported as changed.
+	req["pos"] = pos1
+	req["timeout"] = 10000
+	done := make(chan gjson.Result)
+	go func() {
+		_, r := s.request(aliceDev.AccessToken, req)
+		done <- r
+	}()
+	time.Sleep(200 * time.Millisecond)
+	bobJoin := room.CreateAndInsert(t, bob, spec.MRoomMember, map[string]any{"membership": "join"}, test.WithStateKey(bob.ID))
+	s.publish(bobJoin)
+	select {
+	case res = <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatalf("timed out waiting for long-poll")
+	}
+	if !res.Get(fmt.Sprintf(`extensions.e2ee.device_lists.changed.#(=="%s")`, bob.ID)).Exists() {
+		t.Fatalf("expected bob in device_lists.changed: %s", res.Raw)
+	}
+	pos2 := res.Get("pos").Str
+
+	// The positions can be used with /keys/changes.
+	w := httptest.NewRecorder()
+	s.routers.Client.ServeHTTP(w, test.NewRequest(t, http.MethodGet, "/_matrix/client/v3/keys/changes", test.WithQueryParams(map[string]string{
+		"access_token": aliceDev.AccessToken, "from": pos1, "to": pos2,
+	})))
+	if w.Code != http.StatusOK || !gjson.Get(w.Body.String(), fmt.Sprintf(`changed.#(=="%s")`, bob.ID)).Exists() {
+		t.Fatalf("/keys/changes with pos: got HTTP %d %s", w.Code, w.Body.String())
+	}
+
+	// Bob leaving is reported in device_lists.left.
+	bobLeave := room.CreateAndInsert(t, bob, spec.MRoomMember, map[string]any{"membership": "leave"}, test.WithStateKey(bob.ID))
+	s.publish(bobLeave)
+	req["pos"] = pos2
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		res = s.mustRequest(aliceDev.AccessToken, req)
+		if res.Get(fmt.Sprintf(`extensions.e2ee.device_lists.left.#(=="%s")`, bob.ID)).Exists() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected bob in device_lists.left: %s", res.Raw)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The prefixed key of MSC4543 works on the stable endpoint only.
+	prefixed := map[string]any{"extensions": map[string]any{types.SlidingSyncExtensionE2EEUnstable: map[string]any{"enabled": true}}}
+	code, stableRes := s.requestPath(slidingSyncStablePath, aliceDev.AccessToken, prefixed)
+	if code != http.StatusOK || !stableRes.Get(fmt.Sprintf("extensions.%s.device_one_time_keys_count", gjson.Escape(types.SlidingSyncExtensionE2EEUnstable))).Exists() {
+		t.Fatalf("expected prefixed e2ee section on the stable endpoint: %s", stableRes.Raw)
+	}
+	res = s.mustRequest(aliceDev.AccessToken, prefixed)
+	if len(res.Get("extensions").Map()) != 0 {
+		t.Fatalf("prefixed key must be ignored on the unstable endpoint: %s", res.Raw)
+	}
+
+	// Without keys, the key fields are present but empty.
+	userAPI.otkCounts = nil
+	userAPI.fallbackKeyTypes = nil
+	res = s.mustRequest(aliceDev.AccessToken, map[string]any{"extensions": map[string]any{"e2ee": map[string]any{"enabled": true}}})
+	if res.Get("extensions.e2ee.device_one_time_keys_count").Raw != "{}" || res.Get("extensions.e2ee.device_unused_fallback_key_types").Raw != "[]" {
+		t.Fatalf("expected empty key fields: %s", res.Raw)
+	}
 }

@@ -688,6 +688,16 @@ func (d *DatabaseTransaction) currentStateStreamEventsForRoom(
 	return s, nil
 }
 
+// AllocatedSendToDevicePosition returns the highest position ever allocated to a send-to-device
+// message. Unlike MaxStreamPositionForSendToDeviceMessages, it doesn't decrease when messages are deleted.
+func (d *DatabaseTransaction) AllocatedSendToDevicePosition(ctx context.Context) (types.StreamPosition, error) {
+	id, err := d.SendToDevice.SelectAllocatedSendToDeviceMessageID(ctx, d.txn)
+	if err != nil {
+		return 0, fmt.Errorf("d.SendToDevice.SelectAllocatedSendToDeviceMessageID: %w", err)
+	}
+	return types.StreamPosition(id), nil
+}
+
 func (d *DatabaseTransaction) SendToDeviceUpdatesForSync(
 	ctx context.Context,
 	userID, deviceID string,
